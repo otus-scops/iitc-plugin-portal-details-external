@@ -2,9 +2,9 @@
 // @id             iitc-plugin-portal-details-external@otusscops
 // @name           IITC Plugin: Portal Details External Window
 // @category       Portal Info
-// @version        0.1.4.202603160940
+// @version        0.3.2.202603280730
 // @namespace      iitc-plugin-portal-details-external
-// @description    ポータル詳細情報を別ウィンドウで常時表示し、動的更新・クリック・フォーム入力のリアルタイム伝播に対応します。
+// @description    ポータル詳細情報を別ウィンドウで表示します。タイトルバーのアイコンから表示モードを直感的に切り替えられます。
 // @downloadURL    https://github.com/otus-scops/iitc-plugin-portal-details-external/raw/refs/heads/main/iitc-plugin-portal-details-external.user.js
 // @updateURL      https://github.com/otus-scops/iitc-plugin-portal-details-external/raw/refs/heads/main/iitc-plugin-portal-details-external.user.js
 // @include        https://*.ingress.com/*
@@ -18,7 +18,16 @@
  * Copyright 2026 otusscops
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
- * ...
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 (function () {
@@ -30,7 +39,7 @@
     }
 
     plugin_info.buildName = "iitc-ja-otusscops";
-    plugin_info.dateTimeVersion = "202603160940";
+    plugin_info.dateTimeVersion = "202603280730";
     plugin_info.pluginId = "portal-details-external";
 
     // PLUGIN START ////////////////////////////////////////////////////////
@@ -40,27 +49,44 @@
     }
     const self = window.plugin.portalDetailsExternal;
 
+    const STORAGE_KEY = "portal-details-external-option";
     let childWindow = null;
     let observer = null;
     let syncTimer = null;
 
-    /**
-     * 要素からルート(#portaldetails)までのインデックス経路を取得するヘルパー関数
-     */
+    const DEFAULT_OPTIONS = {
+      popoutMode: true // デフォルトはポップアウトON
+    };
+    let OptionData = { ...DEFAULT_OPTIONS };
+
+    self.loadOption = function () {
+      try {
+        const stream = localStorage.getItem(STORAGE_KEY);
+        if (stream) {
+          OptionData = { ...DEFAULT_OPTIONS, ...JSON.parse(stream) };
+        }
+      } catch (e) {
+        console.error("[PortalDetailsExternal] Load settings failed:", e);
+      }
+    };
+
+    self.saveOption = function () {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(OptionData));
+    };
+
     self.getElementPath = function (element, root) {
       const path = [];
       let current = element;
       while (current && current !== root && current.tagName !== "BODY") {
+        if (!current.parentNode || !current.parentNode.children) return null;
         const index = Array.prototype.indexOf.call(current.parentNode.children, current);
+        if (index === -1) return null;
         path.unshift(index);
         current = current.parentNode;
       }
       return current === root ? path : null;
     };
 
-    /**
-     * インデックス経路から要素を特定するヘルパー関数
-     */
     self.getElementByPath = function (path, root) {
       let current = root;
       for (const index of path) {
@@ -73,11 +99,54 @@
       return current;
     };
 
+    /**
+     * 切り替え用アイコンをポータルタイトル内に注入・更新する
+     */
+    self.addToggleIcon = function () {
+      const details = document.getElementById("portaldetails");
+      if (!details) return;
+
+      let icon = document.getElementById("pd-ext-toggle-icon");
+      const isPopout = OptionData.popoutMode;
+
+      const expectedTitle = isPopout ? "標準表示に戻す" : "ポップアウト表示にする";
+      const svgTransform = isPopout ? 'transform: rotate(180deg); transform-origin: center;' : '';
+      const svgContent = `<svg viewBox="0 0 24 24" style="width: 100%; height: 100%; fill: currentColor; ${svgTransform}"><path d="M14,3V5H17.59L7.76,14.83L9.17,16.24L19,6.41V10H21V3M19,19H5V5H12V3H5C3.89,3 3,3.9 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V12H19V19Z" /></svg>`;
+
+      if (!icon) {
+        icon = document.createElement("div");
+        icon.id = "pd-ext-toggle-icon";
+        
+        icon.onclick = function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          self.toggleMode();
+        };
+
+        const titleEl = details.querySelector(".title");
+        if (titleEl) {
+          titleEl.appendChild(icon);
+        } else {
+          details.insertBefore(icon, details.firstChild);
+        }
+      }
+
+      // 無限ループ（MutationObserverの連続発火）を防ぐため、状態が変わった時のみDOMを更新する
+      if (icon.getAttribute("data-popout-state") !== String(isPopout)) {
+        icon.title = expectedTitle;
+        icon.innerHTML = svgContent;
+        icon.setAttribute("data-popout-state", String(isPopout));
+      }
+    };
+
     self.setupChildWindow = function () {
+      if (!OptionData.popoutMode) return;
+
       if (!childWindow || childWindow.closed) {
         childWindow = window.open("", "iitc_portal_details", "width=450,height=800,menubar=no,toolbar=no,location=no,status=no");
         if (childWindow) {
           self.preRenderChild(childWindow);
+          self.syncDOM();
         } else {
           console.warn("[PortalDetailsExternal] ポップアップがブロックされました。");
         }
@@ -117,8 +186,29 @@
 
       const childRoot = win.document.getElementById("portaldetails");
 
-      // === クリックイベントの伝播 ===
+      win.addEventListener("beforeunload", function () {
+        if (OptionData.popoutMode) {
+          self.setMode(false);
+        }
+      });
+
       win.document.addEventListener("click", function (event) {
+        let current = event.target;
+        
+        while (current && current !== doc.body && current !== doc) {
+          if (current.id === "pd-ext-toggle-icon") {
+            event.preventDefault();
+            event.stopPropagation();
+            if (window.opener && window.opener.plugin && window.opener.plugin.portalDetailsExternal) {
+               window.opener.plugin.portalDetailsExternal.toggleMode();
+            } else {
+               win.close(); 
+            }
+            return;
+          }
+          current = current.parentNode;
+        }
+
         const path = self.getElementPath(event.target, childRoot);
         if (path) {
           const parentTarget = self.getElementByPath(path, document.getElementById("portaldetails"));
@@ -129,10 +219,8 @@
         }
       });
 
-      // === フォーム入力（テキスト、チェックボックス等）の伝播 ===
       const handleInput = function (event) {
         const target = event.target;
-        // 入力要素以外は無視
         if (!["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
 
         const path = self.getElementPath(target, childRoot);
@@ -140,63 +228,49 @@
 
         const parentTarget = self.getElementByPath(path, document.getElementById("portaldetails"));
         if (parentTarget) {
-          // 値の同期
           if (target.type === "checkbox" || target.type === "radio") {
             parentTarget.checked = target.checked;
           } else {
             parentTarget.value = target.value;
           }
-
-          // 親側の外部プラグインに「変更された」ことを検知させるため、イベントを強制発火
           parentTarget.dispatchEvent(new Event('input', { bubbles: true }));
           parentTarget.dispatchEvent(new Event('change', { bubbles: true }));
         }
       };
 
-      // inputはテキスト入力のリアルタイム反映、changeはセレクトボックス等の確定用
       win.document.addEventListener("input", handleInput);
       win.document.addEventListener("change", handleInput);
     };
 
-    /**
-     * 親ウィンドウのポータル詳細HTMLを子ウィンドウへ同期する
-     * ※入力中のフォーカスとカーソル位置を保護する
-     */
     self.syncDOM = function () {
-      if (!childWindow || childWindow.closed) return;
+      if (!OptionData.popoutMode || !childWindow || childWindow.closed) return;
+      
       const source = document.getElementById("portaldetails");
       const target = childWindow.document.getElementById("portaldetails");
       
       if (source && target) {
-        // --- フォーカス状態の退避 ---
         let activePath = null;
         let selectionStart = 0;
         let selectionEnd = 0;
         const activeEl = childWindow.document.activeElement;
         
-        // 入力欄にフォーカスが当たっているか確認
         if (activeEl && ["INPUT", "TEXTAREA"].includes(activeEl.tagName)) {
           activePath = self.getElementPath(activeEl, target);
           if (activePath) {
             try {
               selectionStart = activeEl.selectionStart || 0;
               selectionEnd = activeEl.selectionEnd || 0;
-            } catch (e) {
-              // 一部のinput type(number等)はselection取得でエラーになるため無視
-            }
+            } catch (e) {}
           }
         }
 
-        // --- DOMの同期実行 ---
         target.innerHTML = source.innerHTML;
 
-        // --- フォーカス状態の復元 ---
         if (activePath) {
           const restoredEl = self.getElementByPath(activePath, target);
           if (restoredEl) {
             restoredEl.focus();
             try {
-              // カーソル位置を元の場所にセット
               restoredEl.setSelectionRange(selectionStart, selectionEnd);
             } catch (e) {}
           }
@@ -209,6 +283,9 @@
       if (!sidebar) return;
 
       observer = new MutationObserver((mutations) => {
+        self.addToggleIcon();
+
+        if (!OptionData.popoutMode) return;
         if (syncTimer) clearTimeout(syncTimer);
         syncTimer = setTimeout(self.syncDOM, 50);
       });
@@ -222,6 +299,10 @@
     };
 
     self.onPortalDetailsUpdated = function (data) {
+      self.addToggleIcon();
+
+      if (!OptionData.popoutMode) return;
+      
       if (!childWindow || childWindow.closed) {
         self.setupChildWindow();
       }
@@ -229,26 +310,68 @@
       syncTimer = setTimeout(self.syncDOM, 50);
     };
 
+    self.setMode = function (state) {
+      OptionData.popoutMode = state;
+      self.saveOption();
+      self.applyMode();
+    };
+
+    self.toggleMode = function () {
+      self.setMode(!OptionData.popoutMode);
+    };
+
+    self.applyMode = function () {
+      self.addToggleIcon();
+
+      if (OptionData.popoutMode) {
+        if (!document.getElementById("portal-details-ext-hide-css")) {
+          const hideCss = `
+            #portaldetails { display: none !important; }
+            #updatestatus { bottom: 0 !important; }
+          `;
+          $("<style>").prop("type", "text/css").prop("id", "portal-details-ext-hide-css").html(hideCss).appendTo("head");
+        }
+        self.setupChildWindow();
+      } else {
+        $("#portal-details-ext-hide-css").remove();
+        if (childWindow && !childWindow.closed) {
+          childWindow.close();
+        }
+      }
+    };
+
     self.start = function () {
+      self.loadOption();
+      
+      const iconCss = `
+        #portaldetails .title { position: relative; }
+        #pd-ext-toggle-icon {
+          position: absolute;
+          top: 4px;
+          right: 26px; /* 閉じるボタンの左隣へ配置 */
+          width: 20px;
+          height: 20px;
+          cursor: pointer;
+          color: #ffce00;
+          z-index: 10;
+          opacity: 0.7;
+          transition: opacity 0.2s;
+        }
+        #pd-ext-toggle-icon:hover {
+          opacity: 1.0;
+        }
+        #pd-ext-toggle-icon svg {
+          transition: transform 0.3s ease; 
+        }
+      `;
+      $("<style>").prop("type", "text/css").html(iconCss).appendTo("head");
+
       window.addHook("portalDetailsUpdated", self.onPortalDetailsUpdated);
       self.setupObserver();
 
-      $("#toolbox").append(
-        ' <a onclick="window.plugin.portalDetailsExternal.setupChildWindow();" title="詳細ウィンドウを強制表示します">詳細ウィンドウ強制表示</a>'
-      );
-
-      const css = `
-        #portaldetails { display: none !important; }
-        #updatestatus { bottom: 0 !important; }
-      `;
-      $("<style>")
-        .prop("type", "text/css")
-        .prop("id", "portal-details-ext-hide-css")
-        .html(css)
-        .appendTo("head");
-
-      setTimeout(self.setupChildWindow, 1000);
-      console.log("[PortalDetailsExternal] Started with Event & Input Propagation");
+      setTimeout(self.applyMode, 1000);
+      
+      console.log("[PortalDetailsExternal] Started. Popout Mode:", OptionData.popoutMode);
     };
 
     const setup = self.start;
